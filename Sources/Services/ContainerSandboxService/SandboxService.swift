@@ -14,8 +14,6 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
-//
-
 import ContainerClient
 import ContainerNetworkService
 import ContainerPersistence
@@ -37,6 +35,7 @@ import struct ContainerizationOCI.Process
 
 /// An XPC service that manages the lifecycle of a single VM-backed container.
 public actor SandboxService {
+    private let connection: xpc_connection_t
     private let root: URL
     private let interfaceStrategy: InterfaceStrategy
     private var container: ContainerInfo?
@@ -66,12 +65,36 @@ public actor SandboxService {
     ///   - interfaceStrategy: The strategy for producing network interface
     ///     objects for each network to which the container attaches.
     ///   - log: The destination for log messages.
-    public init(root: URL, interfaceStrategy: InterfaceStrategy, eventLoopGroup: any EventLoopGroup, log: Logger) {
+    public init(
+        root: URL,
+        interfaceStrategy: InterfaceStrategy,
+        eventLoopGroup: any EventLoopGroup,
+        connection: xpc_connection_t,
+        log: Logger
+    ) {
         self.root = root
         self.interfaceStrategy = interfaceStrategy
         self.log = log
         self.monitor = ExitMonitor(log: log)
         self.eventLoopGroup = eventLoopGroup
+        self.connection = connection
+    }
+
+    /// Returns an endpoint from an anonymous xpc connection.
+    ///
+    /// - Parameters:
+    ///   - message: An XPC message with no parameters.
+    ///
+    /// - Returns: An XPC message with the following parameters:
+    ///   - endpoint: An XPC endpoint that can be used to communicate
+    ///     with the sandbox service.
+    @Sendable
+    public func createEndpoint(_ message: XPCMessage) async throws -> XPCMessage {
+        self.log.info("`createEndpoint` xpc handler")
+        let endpoint = xpc_endpoint_create(self.connection)
+        let reply = message.reply()
+        reply.set(key: .sandboxServiceEndpoint, value: endpoint)
+        return reply
     }
 
     /// Start the VM and the guest agent process for a container.
@@ -225,7 +248,6 @@ public actor SandboxService {
             if id == containerId {
                 try await self.startInitProcess(lock: lock)
                 await self.setState(.running)
-                try await self.sendContainerEvent(.containerStart(id: id))
             } else {
                 try await self.startExecProcess(processId: id, lock: lock)
             }
@@ -264,7 +286,6 @@ public actor SandboxService {
         } catch {
             try? await self.cleanupContainer()
             self.setState(.created)
-            try await self.sendContainerEvent(.containerExit(id: id, exitCode: -1))
             throw error
         }
     }
